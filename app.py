@@ -1,10 +1,14 @@
-# HR Employee Attrition Prediction - Professional Streamlit App
-# Run: streamlit run hr_attrition_streamlit_app.py
+# HR Employee Attrition Prediction - Ready Streamlit App
+# Run: streamlit run app.py
+# Data upload removed: the dashboard loads HR-Final.xlsx / artifacts automatically.
 
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, List, Tuple
+
+import joblib
 
 import numpy as np
 import pandas as pd
@@ -15,6 +19,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DATA_PATH = BASE_DIR / "HR-Final.xlsx"
+ARTIFACT_DIR = BASE_DIR / "artifacts"
+ARTIFACT_PATH = ARTIFACT_DIR / "hr_attrition_model_bundle.joblib"
 
 
 # -----------------------------
@@ -309,7 +319,7 @@ def train_attrition_model(file_bytes: bytes, selected_features: Tuple[str, ...])
         balancing_status = "SMOTE skipped because the minority class is too small"
 
     model = XGBClassifier(
-        n_estimators=300,
+        n_estimators=160,
         max_depth=5,
         learning_rate=0.05,
         subsample=0.8,
@@ -318,7 +328,7 @@ def train_attrition_model(file_bytes: bytes, selected_features: Tuple[str, ...])
         gamma=0.1,
         eval_metric="logloss",
         random_state=42,
-        n_jobs=-1,
+        n_jobs=1,
     )
     model.fit(X_train_model, y_train_model)
 
@@ -427,7 +437,7 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, summary_df: pd.DataFrame) -> byte
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="All Predictions", index=False)
-        df[df["Risk_Level"] == " High"].to_excel(writer, sheet_name="High Risk", index=False)
+        df[df["Risk_Level"] == "🔴 High"].to_excel(writer, sheet_name="High Risk", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
     buffer.seek(0)
     return buffer.read()
@@ -464,74 +474,84 @@ st.markdown(
 
 
 # -----------------------------
+# Ready model / data loading
+# -----------------------------
+def choose_default_features(encoded_df: pd.DataFrame) -> List[str]:
+    """Choose the same fixed feature set used to build the ready model bundle."""
+    available_features = [c for c in encoded_df.columns if c != "Attrition"]
+    preferred_features = [
+        "Age",
+        "Salary",
+        "OverTime",
+        "YearsAtCompany",
+        "DistanceFromHome (KM)",
+        "DistanceFromHome",
+        "JobSatisfaction",
+        "Department",
+        "JobRole",
+        "MaritalStatus",
+        "YearsInMostRecentRole",
+        "YearsSinceLastPromotion",
+        "YearsWithCurrManager",
+        "HireYear",
+        "HireMonth",
+    ]
+    selected = [f for f in preferred_features if f in available_features]
+    return selected if len(selected) >= 2 else available_features
+
+
+@st.cache_resource(show_spinner=False)
+def load_ready_bundle() -> dict:
+    """Load the ready trained bundle. If it is missing, rebuild it once from the bundled Excel file."""
+    if ARTIFACT_PATH.exists():
+        try:
+            return joblib.load(ARTIFACT_PATH)
+        except Exception:
+            # Different package versions can occasionally break pickle/joblib loading.
+            # In that case the app rebuilds the model from the included Excel file.
+            pass
+
+    if not DEFAULT_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {DEFAULT_DATA_PATH.name}. Put HR-Final.xlsx in the same folder as app.py."
+        )
+
+    file_bytes = DEFAULT_DATA_PATH.read_bytes()
+    raw_preview = load_excel(file_bytes)
+    clean_preview, _ = clean_hr_data(raw_preview)
+    encoded_preview, _, _ = encode_hr_data(clean_preview)
+    selected = choose_default_features(encoded_preview)
+    bundle = train_attrition_model(file_bytes, tuple(selected))
+    bundle["data_file"] = DEFAULT_DATA_PATH.name
+
+    ARTIFACT_DIR.mkdir(exist_ok=True)
+    joblib.dump(bundle, ARTIFACT_PATH)
+    return bundle
+
+
+# -----------------------------
 # Sidebar controls
 # -----------------------------
 st.sidebar.title("⚡ HR Intelligence")
-st.sidebar.caption("Dynamic ML web app for attrition prediction and workforce intelligence.")
+st.sidebar.caption("Ready ML web app for attrition prediction and workforce intelligence.")
 
-uploaded_file = st.sidebar.file_uploader("Upload HR Excel workbook", type=["xlsx", "xls"])
-
-if uploaded_file is None:
-    st.info("Upload HR-Final.xlsx or any Excel file that contains an Attrition column to start training the model.")
-    st.markdown(
-        """
-        ### Required file structure:
-        - An `Attrition` column with values like `Yes/No` or `1/0`
-        - HR feature columns such as `Age`, `Salary`, `Department`, `OverTime`, `YearsAtCompany`, and `DistanceFromHome`
-        - Optional columns such as `EmployeeID`, `FullName`, `Column25`, and `HireDate` are handled automatically by the app
-        """
-    )
-    st.stop()
-
-file_bytes = uploaded_file.getvalue()
-
-try:
-    raw_preview = load_excel(file_bytes)
-    clean_preview, dropped_preview = clean_hr_data(raw_preview)
-    encoded_preview, encoders_preview, categorical_preview = encode_hr_data(clean_preview)
-except Exception as exc:
-    st.error(f"File loading error: {exc}")
-    st.stop()
-
-available_features = [c for c in encoded_preview.columns if c != "Attrition"]
-
-preferred_features = [
-    "Age",
-    "Salary",
-    "OverTime",
-    "YearsAtCompany",
-    "DistanceFromHome",
-    "JobSatisfaction",
-    "Department",
-    "JobRole",
-    "MaritalStatus",
-    "HireYear",
-    "HireMonth",
-]
-default_features = [f for f in preferred_features if f in available_features]
-if len(default_features) < 2:
-    default_features = available_features
-
-selected_features = st.sidebar.multiselect(
-    "Model features",
-    options=available_features,
-    default=default_features,
-    help="You can choose all features or only the important ones. The model will retrain using only your selected features.",
-)
-
-if len(selected_features) < 2:
-    st.warning("Please select at least 2 features so the model can run.")
-    st.stop()
-
-with st.spinner("Training XGBoost model..."):
+with st.spinner("Loading ready HR model..."):
     try:
-        result = train_attrition_model(file_bytes, tuple(selected_features))
+        result = load_ready_bundle()
     except Exception as exc:
-        st.error(f"Training error: {exc}")
+        st.error(f"Ready model loading error: {exc}")
         st.stop()
 
+selected_features = result["selected_features"]
 metrics = result["metrics"]
 predictions_df = make_predictions(result)
+
+st.sidebar.success("Ready dashboard loaded")
+st.sidebar.markdown(f"**Data file:** `{result.get('data_file', 'HR-Final.xlsx')}`")
+st.sidebar.markdown(f"**Employees:** `{len(result['raw_df']):,}`")
+st.sidebar.markdown(f"**Model features:** `{len(selected_features)}`")
+st.sidebar.markdown(f"**Accuracy:** `{metrics['accuracy'] * 100:.2f}%`")
+st.sidebar.info("No upload is needed. The app opens directly with the trained model and ready predictions.")
 
 st.markdown(
     f"""
@@ -549,7 +569,7 @@ st.markdown(
 # Main tabs
 # -----------------------------
 tab_dashboard, tab_single, tab_batch, tab_model = st.tabs(
-    [" Command Center", " Predict One", " Workforce Radar", " Model Lab"]
+    ["⚡ Command Center", "🎯 Predict One", "🛡️ Workforce Radar", "🧠 Model Lab"]
 )
 
 
@@ -560,7 +580,7 @@ with tab_dashboard:
     predicted_leavers = int((predictions_df["Predicted_Leave"] == "Yes").sum())
     predicted_stayers = total_employees - predicted_leavers
     attrition_rate = predicted_leavers / total_employees * 100 if total_employees else 0
-    high_risk_count = int((predictions_df["Risk_Level"] == " High").sum())
+    high_risk_count = int((predictions_df["Risk_Level"] == "🔴 High").sum())
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Employees", f"{total_employees:,}")
@@ -642,9 +662,9 @@ with tab_batch:
                 predicted_leavers,
                 predicted_stayers,
                 round(attrition_rate, 1),
-                int((predictions_df["Risk_Level"] == " High").sum()),
-                int((predictions_df["Risk_Level"] == " Medium").sum()),
-                int((predictions_df["Risk_Level"] == " Low").sum()),
+                int((predictions_df["Risk_Level"] == "🔴 High").sum()),
+                int((predictions_df["Risk_Level"] == "🟡 Medium").sum()),
+                int((predictions_df["Risk_Level"] == "🟢 Low").sum()),
                 round(metrics["accuracy"] * 100, 2),
                 "N/A" if np.isnan(metrics["auc"]) else round(metrics["auc"] * 100, 2),
                 round(metrics["f1"] * 100, 2),
